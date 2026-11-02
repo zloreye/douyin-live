@@ -5,6 +5,7 @@ douyin_test/auth/
 douyin_test/shots/
 douyin_test/report.md
 douyin_test/logs/
+douyin_test/runs/
 
 # Playwright MCP 探索页面留下的日志和快照
 .playwright-mcp/
@@ -14,3 +15,5 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+
+CLAUDE.md
