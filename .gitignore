@@ -1,0 +1,15 @@
+# 登录 cookie（真实账号），绝不提交
+douyin_test/auth/
+
+# 运行产物：含账号昵称、抖音号、钻石余额
+douyin_test/shots/
+douyin_test/report.md
+
+# Playwright MCP 探索页面留下的日志和快照
+.playwright-mcp/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
