@@ -11,12 +11,12 @@
 | 扫码登录：二维码 | 扫码区里的二维码 | `#animate_qrcode_container`（约 180×180） | 默认就显示；不显示时点登录框里的「扫码登录」再等。扫码后以 cookie `sessionid` + `sid_tt` 判断登录成功 |
 | 自己的昵称和抖音号 | 自己的个人页 | `https://www.douyin.com/user/self` 的 `[data-e2e="user-info"]`，正则同「目标身份核对」 | 扫码登录后用来给 cookie 文件命名（`<昵称>_<抖音号>.json`）；11-02 用旧 state.json 迁移时实测可用 |
 | 登录态预检 | cookie `sessionid`、`sid_tt` | 先不开浏览器读 cookie 文件，看这两个在不在、`expires` 过没过期；开浏览器后再看 `context.cookies()`（domain 以 `douyin.com` 结尾） | 只是最快的预检：没过期但在别处被登出的 cookie 照样通过，以下一行接口为准 |
-| 当前账号与登录状态 | 直播页自己请求的 `/webcast/user/me/` | 跳转前挂 `expect_response`；`status_code == 0` 且 `data.display_id` 等于 cookie 文件名里的抖音号才继续 | 进房约 14 秒时发出，落在等礼物栏的时间里，不额外耗时。未登录时返回 `status_code 20003`、`data.prompts`「请登录后进入直播间」（11-02 用假 cookie 实测），记为 cookie 失效。原来去自己个人页抠整页文字，既慢（约 10 秒）又从不核对是不是该用的号 |
+| 当前账号与登录状态 | 直播页自己请求的 `/webcast/user/me/` | 跳转前挂 `response` 监听；直播画面出来后分轮等它（每轮 45 秒、共 `WAIT_ROUNDS` 轮，中间提示「继续等待」，不刷新页面）；`status_code == 0` 且 `data.display_id` 等于 cookie 文件名里的抖音号才继续 | 进房约 14 秒时发出。网速慢时三个账号并行进房，有两个账号 45 秒内没等到（原来只等 45 秒，直接 FAIL），分轮后在约 77 秒等到。未登录时返回 `status_code 20003`、`data.prompts`「请登录后进入直播间」（11-02 用假 cookie 实测），记为 cookie 失效。原来去自己个人页抠整页文字，既慢（约 10 秒）又从不核对是不是该用的号 |
 | 目标主页 | 网址 | `https://www.douyin.com/user/{TARGET_SEC_UID}` | 不再搜索；sec_uid 是账号永久编号，改昵称或抖音号都不变 |
 | 目标身份核对 | 主页 `user-info` | `[data-e2e="user-info"]` 里正则 `抖音号[：:]\s*([A-Za-z0-9_.]+)`，与 `TARGET_DOUYIN_ID` 比对 | 不一致就停止，防止 sec_uid 填错 |
 | 是否开播 | 头像上的「直播中」链接 | `a[href*="live.douyin.com/"]` 中地址匹配 `live.douyin.com/<数字>` 且文字含「直播中」 | 数字就是直播间号（web_rid）；看到抖音号后再等 5 秒仍没有才判未开播。左侧导航「直播」也指向 `live.douyin.com/` 但没有数字；`data-e2e="live-avatar"` 是右上角自己的头像，都不能用 |
 | 直播间就绪 | 直播画面 | 只等 `[class*="LivePlayer_LivingPlayer"]` 出现（再加上 `/webcast/user/me/` 回来） | 不看标题、不固定等；余额看钱包接口，不等余额按钮；礼物栏留到送礼那一步再等（见「礼物栏」）。首次进房实测（从开始进入算）：视频 7.2s，标题 12.6s，点赞组件脚本 14.4s，礼物栏 18.2s；同一浏览器再进约 7s |
-| 礼物栏 | 礼物块出现 | 送礼前才等 `[class*="gift_item_gift_bar"]`：每轮 `NAV_TIMEOUT_MS`（45 秒），没出来就提示一声接着等，共 `GIFT_WAIT_ROUNDS`（2）轮；不刷新页面、不重进直播间；`--skip-gift` 时完全不等 | 11-02 用户网速慢时出现过一次：画面、余额按钮都出来了，礼物栏 45 秒没渲染，原来整个账号 FAIL、点赞也没做。现在等不到只记送礼 FAIL（`GiftNotReady`），点赞照常 |
+| 礼物栏 | 礼物块出现 | 送礼前才等 `[class*="gift_item_gift_bar"]`：每轮 `NAV_TIMEOUT_MS`（45 秒），没出来就提示一声接着等，共 `WAIT_ROUNDS`（2）轮；不刷新页面、不重进直播间；`--skip-gift` 时完全不等 | 11-02 用户网速慢时出现过一次：画面、余额按钮都出来了，礼物栏 45 秒没渲染，原来整个账号 FAIL、点赞也没做。现在等不到只记送礼 FAIL（`GiftNotReady`），点赞照常 |
 | 礼物项 | 单个礼物 | `[class*="gift_item_gift_bar"]` + `filter(has=get_by_text("人气票", exact=True))` | 名字必须完全相等；`has_text` 是包含匹配，「抖音」会选中 10001 钻的「抖音1号」 |
 | 礼物单价 | 礼物项文字 | 礼物项 `inner_text()` 后正则 `(\d+)\s*钻` | 如「棒棒糖 9钻」；送礼校验要求扣费 = 单价 |
 | 赠送按钮 | 礼物项内的「赠送」 | `item.locator('[data-e2e="gift-btn"]')`；悬停后 2 秒内没出现就移开鼠标再悬停，最多 5 次 | 测试标记，平时就在但隐藏，鼠标进入礼物项 150ms 后才显示。礼物栏的「当前选中」一被页面改动（刚加载时会发生），礼物项就取消悬停状态；鼠标不动就不会再有「鼠标进入」，按钮会一直隐藏（实测偶发过一次 20 秒超时） |
@@ -38,4 +38,4 @@
 6. **类名是构建哈希**：`saw7uCUW`、`JJwXO946` 之类每次发版都会变；能用的只有 `gift_item_gift_bar`、`webcast-chatroom___list` 这类带语义的，以及 `data-e2e` 测试标记（如 `user-info`、`gift-btn`）。
 7. **WAF**：首屏会先返回抖音的 PoW 挑战页（`_wafchallengeid`），必须真实执行 JS 才能进站，所以 `headless=True` 容易卡住，调试期用有头模式。
 8. **登录框时有时无**：同样等 12~15 秒后点「登录」，有几次点完 0.8 秒整页脚本重新加载、一直不弹框，内容区还停在骨架屏；也有一次 5 秒内就弹出来了。当时网速较慢，没能确定原因（网速、页面还没准备好，或风控 iframe `rc-verifycenter/rmc-nocaptcha`），所以 `login_qr.py` 靠重试加手动兜底。
-9. **并行多开**：每个账号一个 Chrome，启动参数里有 `--mute-audio`，多开不会一起出声。Playwright 默认带 `--disable-backgrounding-occluded-windows`、`--disable-renderer-backgrounding`、`--disable-background-timer-throttling`，被挡住的窗口不会降频；点击走 CDP，不需要窗口在前台。两个账号并行时进房约 50 秒（串行约 30 秒）。
+9. **并行多开**：每个账号一个 Chrome，启动参数里有 `--mute-audio`，多开不会一起出声。Playwright 默认带 `--disable-backgrounding-occluded-windows`、`--disable-renderer-backgrounding`、`--disable-background-timer-throttling`，被挡住的窗口不会降频；点击走 CDP，不需要窗口在前台。两个账号并行时进房约 50 秒（串行约 30 秒）；三个账号并行时账号信息接口约 77 秒才回来。
