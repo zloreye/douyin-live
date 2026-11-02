@@ -1,16 +1,15 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-STATE_FILE = ROOT / "auth" / "state.json"
+# 每个账号一个 cookie 文件：<昵称>_<抖音号>.json，由 login_qr.py 扫码生成；进直播间后核对登录的抖音号与文件名一致
+AUTH_DIR = ROOT / "auth"
 SHOT_DIR = ROOT / "shots"
 REPORT_FILE = ROOT / "report.md"
+LOG_DIR = ROOT / "logs"
 
 BASE_URL = "https://www.douyin.com"
 LOGIN_URL = "https://www.douyin.com"
 LIVE_URL = "https://live.douyin.com/{web_rid}"
-
-# 用来送礼和点赞的账号（即 state.json 登录的那个号）的抖音号；进直播间后核对，不一致就停止
-MY_DOUYIN_ID = "97093434274"
 
 # 目标的抖音号，用来在个人页上核对身份
 TARGET_DOUYIN_ID = "37846826470"
@@ -26,3 +25,5 @@ VIEWPORT = {"width": 1440, "height": 900}
 LOCALE = "zh-CN"
 NAV_TIMEOUT_MS = 45000
 ACTION_TIMEOUT_MS = 20000
+# 送礼前等礼物栏、等钱包接口余额的轮数，每轮 NAV_TIMEOUT_MS，不刷新页面；等不到只记送礼失败，点赞照常
+GIFT_WAIT_ROUNDS = 2
