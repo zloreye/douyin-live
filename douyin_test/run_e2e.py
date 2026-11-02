@@ -90,7 +90,9 @@ class Steps:
             "|---|---|---|",
         ]
         for name, status, detail in self.rows:
-            lines.append(f"| {name} | {status} | {detail.replace('|', '/')} |")
+            # 表格一行不能断开：Playwright 超时信息带多行 Call log，换行连同缩进改成一个空格
+            cell = re.sub(r"\s*\n\s*", " ", detail.strip()).replace("|", "/")
+            lines.append(f"| {name} | {status} | {cell} |")
         return "\n".join(lines) + "\n"
 
 
