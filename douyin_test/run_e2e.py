@@ -389,6 +389,9 @@ def main() -> int:
 
     steps = Steps(args)
     config.SHOT_DIR.mkdir(parents=True, exist_ok=True)
+    # 先清掉上次的截图：跳过或失败的步骤不会截图，留着旧图容易被当成本次结果
+    for old in config.SHOT_DIR.glob("*.png"):
+        old.unlink()
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
