@@ -394,21 +394,27 @@ def main() -> int:
         old.unlink()
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=config.HEADLESS,
-            channel=config.BROWSER_CHANNEL,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-        ctx = browser.new_context(
-            storage_state=str(config.STATE_FILE),
-            viewport=config.VIEWPORT,
-            locale=config.LOCALE,
-        )
-        ctx.set_default_timeout(config.ACTION_TIMEOUT_MS)
-        ctx.set_default_navigation_timeout(config.NAV_TIMEOUT_MS)
-        page = ctx.new_page()
-
+        # 启动浏览器也放在 try 里：缺登录文件、文件损坏、Chrome 启动失败时同样记 FAIL 并重写报告
+        browser = page = None
         try:
+            if not config.STATE_FILE.exists():
+                steps.add("校验登录态", "FAIL", f"未找到 {config.STATE_FILE}，请先运行 setup_login.py")
+                raise SystemExit(1)
+
+            browser = p.chromium.launch(
+                headless=config.HEADLESS,
+                channel=config.BROWSER_CHANNEL,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+            ctx = browser.new_context(
+                storage_state=str(config.STATE_FILE),
+                viewport=config.VIEWPORT,
+                locale=config.LOCALE,
+            )
+            ctx.set_default_timeout(config.ACTION_TIMEOUT_MS)
+            ctx.set_default_navigation_timeout(config.NAV_TIMEOUT_MS)
+            page = ctx.new_page()
+
             assert_session(ctx)
             steps.add("校验登录态", "PASS", "cookie sessionid 存在（预检，进直播间后以接口为准）")
 
@@ -482,14 +488,16 @@ def main() -> int:
             raise
         except Exception as exc:
             steps.add("异常中断", "FAIL", f"{type(exc).__name__}: {exc}")
-            try:
-                shot(page, "99_error")
-            except Exception:
-                pass
+            if page is not None:
+                try:
+                    shot(page, "99_error")
+                except Exception:
+                    pass
             raise
         finally:
             config.REPORT_FILE.write_text(steps.render(), encoding="utf-8")
-            browser.close()
+            if browser is not None:
+                browser.close()
             status, code, summary = steps.overall()
             print(f"总体结果 {status}（{summary}），退出码 {code}")
 

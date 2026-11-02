@@ -34,7 +34,7 @@ python douyin_test/run_e2e.py --skip-gift
 
 - 参数：`--likes N`、`--gift <礼物名>`、`--skip-gift`、`--skip-like`，默认值来自 `config.py`。
 - 没有单独跑某一步的入口：预检、打开主页、进直播间、核对账号总会执行，送礼/点赞用 `--skip-*` 开关组合。
-- 退出码由 `Steps.overall()` 按最差结果汇总：0 全部 PASS/SKIP；2 有 WARN（含目标未开播；`setup_login.py` 超时也返回 2）；其它异常记 FAIL、截 `99_error.png` 后原样抛出，进程以 1 退出。
+- 退出码由 `Steps.overall()` 按最差结果汇总：0 全部 PASS/SKIP；2 有 WARN（含目标未开播；`setup_login.py` 超时也返回 2）；缺 `auth/state.json` 时记 FAIL、只打印提示不打堆栈，以 1 退出；其它异常（含 Chrome 启动失败、state.json 损坏）记 FAIL，页面已打开时截 `99_error.png`，然后原样抛出，进程以 1 退出。
 - 脚本用 `import config`，从任意目录运行都可以；路径都在 `config.py` 里相对文件解析。
 - 能离线做的只有语法检查 `python -m py_compile douyin_test/*.py`，其余改动只能真机运行验证。
 
@@ -51,7 +51,7 @@ python douyin_test/run_e2e.py --skip-gift
 
 - `config.py`：两个账号的身份（`MY_DOUYIN_ID` 是送礼点赞用的号；`TARGET_SEC_UID` + `TARGET_DOUYIN_ID` 是目标主播）、礼物名、点赞数、超时、视口、浏览器通道和产物路径。
 - `setup_login.py`：一次性人工登录，保存 Playwright `storage_state`。
-- `run_e2e.py`：单文件流程。`main()` 依次调用各步骤函数，每步用 `Steps.add(name, status, detail)` 记录 PASS / WARN / SKIP / FAIL 并实时打印；`finally` 中无论成败都覆盖写入 `report.md`。截图写到 `shots/`：`02_target`、`03_live`、`04_gift`、`05_like`、`99_error`。每次运行开始时先删掉 `shots/` 里的全部 png，目录里只有本次的截图；跳过或失败的步骤没有对应截图。
+- `run_e2e.py`：单文件流程。`main()` 依次调用各步骤函数，每步用 `Steps.add(name, status, detail)` 记录 PASS / WARN / SKIP / FAIL 并实时打印；启动浏览器也在 `try` 里，`finally` 中无论成败（包括启动阶段失败）都覆盖写入 `report.md`。截图写到 `shots/`：`02_target`、`03_live`、`04_gift`、`05_like`、`99_error`。每次运行开始时先删掉 `shots/` 里的全部 png，目录里只有本次的截图；跳过或失败的步骤没有对应截图。
 - 可预期的业务失败用自定义异常降级为 WARN、不中断流程：`InsufficientBalance`（余额小于单价，不点赠送）、`LikeNotReady`（点赞组件 20 秒内未加载）。其它异常记 FAIL 并重新抛出。
 
 ### 两道身份核对
