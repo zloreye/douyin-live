@@ -10,25 +10,25 @@ from playwright.sync_api import Locator, Page, Response, TimeoutError as PWTimeo
 
 import config
 
-# \u4e2a\u4eba\u9875 user-info\uff1a\u7b2c\u4e00\u884c\u662f\u6635\u79f0\uff0c\u5176\u4e2d\u6709\u300c\u6296\u97f3\u53f7\uff1axxx\u300d
+# 个人页 user-info：第一行是昵称，其中有「抖音号：xxx」
 PROFILE_INFO_JS = """() => {
   const text = document.querySelector('[data-e2e="user-info"]')?.innerText || '';
-  const m = text.match(/\u6296\u97f3\u53f7[\uff1a:]\\s*([A-Za-z0-9_.]+)/);
+  const m = text.match(/抖音号[：:]\\s*([A-Za-z0-9_.]+)/);
   return m ? { name: text.split('\\n')[0].trim(), douyin_id: m[1] } : null;
 }"""
 
-# \u5f00\u64ad\u65f6\u5934\u50cf\u4e0a\u6709\u300c\u76f4\u64ad\u4e2d\u300d\u94fe\u63a5\uff0c\u6307\u5411 live.douyin.com/<\u76f4\u64ad\u95f4\u53f7>\u3002
-# \u5de6\u4fa7\u5bfc\u822a\u680f\u7684\u300c\u76f4\u64ad\u300d\u4e5f\u6307\u5411 live.douyin.com/ \u4f46\u6ca1\u6709\u76f4\u64ad\u95f4\u53f7\uff1bdata-e2e="live-avatar" \u662f\u53f3\u4e0a\u89d2\u81ea\u5df1\u7684\u5934\u50cf\uff0c\u90fd\u4e0d\u80fd\u7528\u3002
+# 开播时头像上有「直播中」链接，指向 live.douyin.com/<直播间号>。
+# 左侧导航栏的「直播」也指向 live.douyin.com/ 但没有直播间号；data-e2e="live-avatar" 是右上角自己的头像，都不能用。
 LIVE_LINK_JS = """() => {
   const a = [...document.querySelectorAll('a[href*="live.douyin.com/"]')]
-    .find(a => /live\\.douyin\\.com\\/\\d+/.test(a.href) && (a.innerText || '').includes('\u76f4\u64ad\u4e2d'));
+    .find(a => /live\\.douyin\\.com\\/\\d+/.test(a.href) && (a.innerText || '').includes('直播中'));
   return a ? a.href : null;
 }"""
 
-# \u524d\u7aef\u628a\u8fde\u7eed\u70b9\u8d5e\u6512\u6210\u4e00\u6279\uff0c\u6700\u540e\u4e00\u6b21\u70b9\u8d5e\u7ea6 2 \u79d2\u540e POST \u6b64\u63a5\u53e3\uff0cquery \u5e26 count=N
+# 前端把连续点赞攒成一批，最后一次点赞约 2 秒后 POST 此接口，query 带 count=N
 LIKE_API = "/webcast/room/like/"
-# \u70b9\u8d5e\u7ec4\u4ef6\u89c4\u5219\uff1a\u7b2c\u4e00\u4e0b\u53ea\u8bb0\u65f6\u95f4\uff1b500ms \u5185\u7b2c\u4e8c\u4e0b\u7b97 1 \u8d5e\u5e76\u5f00\u542f\u8fde\u51fb\uff1b\u8fde\u51fb\u5f00\u59cb\u540e 500ms \u5185\u6bcf\u4e0b\u518d\u7b97 1 \u8d5e
-# \uff08\u7a97\u53e3\u4e0d\u4f1a\u987a\u5ef6\uff09\uff1b\u7a97\u53e3\u8fc7\u540e\u7684\u7b2c\u4e00\u4e0b\u53ea\u7528\u6765\u9000\u51fa\u8fde\u51fb\u3002200ms \u4e00\u4e0b\u65f6\u6bcf\u8f6e\u300c\u8bb0\u65f6\u95f4\u3001\u8d5e\u3001\u8d5e\u3001\u8d5e\u3001\u9000\u51fa\u300d= 5 \u4e0b 3 \u8d5e\u3002
+# 点赞组件规则：第一下只记时间；500ms 内第二下算 1 赞并开启连击；连击开始后 500ms 内每下再算 1 赞
+# （窗口不会顺延）；窗口过后的第一下只用来退出连击。200ms 一下时每轮「记时间、赞、赞、赞、退出」= 5 下 3 赞。
 LIKE_CLICK_INTERVAL_MS = 200
 LIKE_READY_JS = """() => performance.getEntriesByType('resource')
   .some(e => e.name.includes('/LiveLike.') && e.name.split('?')[0].endsWith('.js'))"""
@@ -120,23 +120,23 @@ def check_account(me: dict, expected_id: str) -> tuple[str, str]:
 
 
 def open_target_profile(page: Page, sec_uid: str, douyin_id: str) -> dict:
-    """\u76f4\u63a5\u6253\u5f00\u76ee\u6807\u4e2a\u4eba\u9875\uff0c\u6838\u5bf9\u6296\u97f3\u53f7\uff0c\u5e76\u4ece\u300c\u76f4\u64ad\u4e2d\u300d\u94fe\u63a5\u53d6\u76f4\u64ad\u95f4\u53f7\uff1b\u672a\u5f00\u64ad\u65f6 web_rid \u4e3a None\u3002"""
+    """直接打开目标个人页，核对抖音号，并从「直播中」链接取直播间号；未开播时 web_rid 为 None。"""
     page.goto(f"{config.BASE_URL}/user/{sec_uid}", wait_until="domcontentloaded")
     try:
         info = page.wait_for_function(PROFILE_INFO_JS, timeout=config.NAV_TIMEOUT_MS).json_value()
     except PWTimeout:
-        raise RuntimeError("\u76ee\u6807\u4e2a\u4eba\u9875\u6ca1\u6709\u663e\u793a\u51fa\u7528\u6237\u4fe1\u606f\uff08\u53ef\u80fd\u88ab\u9650\u6d41\u6216\u9875\u9762\u7a7a\u767d\uff09") from None
+        raise RuntimeError("目标个人页没有显示出用户信息（可能被限流或页面空白）") from None
     if info["douyin_id"] != douyin_id:
-        raise RuntimeError(f"\u4e2a\u4eba\u9875\u4e0a\u7684\u6296\u97f3\u53f7\u662f {info['douyin_id']}\uff0c\u4e0d\u662f\u914d\u7f6e\u7684 {douyin_id}\uff0c\u8bf7\u68c0\u67e5 TARGET_SEC_UID")
+        raise RuntimeError(f"个人页上的抖音号是 {info['douyin_id']}，不是配置的 {douyin_id}，请检查 TARGET_SEC_UID")
 
-    # \u300c\u76f4\u64ad\u4e2d\u300d\u53ef\u80fd\u6bd4\u7528\u6237\u4fe1\u606f\u665a\u4e00\u70b9\u51fa\u73b0\uff0c\u591a\u7ed9\u51e0\u79d2\u518d\u5224\u5b9a\u672a\u5f00\u64ad
+    # 「直播中」可能比用户信息晚一点出现，多给几秒再判定未开播
     try:
         href = page.wait_for_function(LIVE_LINK_JS, timeout=5000).json_value()
     except PWTimeout:
         href = None
-        # \u5b9e\u6d4b\u8fde\u5f00\u51e0\u4e2a\u4e3b\u9875\u65f6\uff0c\u5185\u5bb9\u4f1a\u5148\u51fa\u73b0\u518d\u6574\u7247\u53d8\u7a7a\uff1b\u8fd9\u79cd\u60c5\u51b5\u4e0d\u80fd\u5f53\u6210\u672a\u5f00\u64ad
+        # 实测连开几个主页时，内容会先出现再整片变空；这种情况不能当成未开播
         if not page.evaluate(PROFILE_INFO_JS):
-            raise RuntimeError("\u76ee\u6807\u4e2a\u4eba\u9875\u5185\u5bb9\u6d88\u5931\uff08\u53ef\u80fd\u88ab\u9650\u6d41\uff09\uff0c\u65e0\u6cd5\u5224\u65ad\u662f\u5426\u5f00\u64ad") from None
+            raise RuntimeError("目标个人页内容消失（可能被限流），无法判断是否开播") from None
     m = re.search(r"live\.douyin\.com/(\d+)", href or "")
     return {**info, "web_rid": m.group(1) if m else None}
 
@@ -146,8 +146,8 @@ def open_live(page: Page, web_rid: str) -> dict:
     # 直播页资源有几百个，默认只记 250 条资源计时，晚加载的 LiveLike 脚本会记不进去
     page.add_init_script("performance.setResourceTimingBufferSize(5000)")
     ready = False
-    # \u53ea\u7b49\u540e\u9762\u8981\u7528\u7684\u5143\u7d20\uff1a\u89c6\u9891\uff08\u70b9\u8d5e\uff09\u3001\u793c\u7269\u680f\uff08\u9001\u793c\uff09\u3001\u4f59\u989d\u6309\u94ae\uff08\u8bfb\u4f59\u989d\uff09\u3002\u4e0d\u770b\u6807\u9898\uff0c\u4e5f\u4e0d\u56fa\u5b9a\u7b49\u3002
-    # \u4f59\u989d\u6309\u94ae\u53ea\u8981\u6c42\u51fa\u73b0\uff1a\u4f59\u989d\u4e3a 0 \u65f6\u5b83\u663e\u793a\u300c\u5145\u503c\u300d\u800c\u4e0d\u662f\u6570\u5b57
+    # 只等后面要用的元素：视频（点赞）、礼物栏（送礼）、余额按钮（读余额）。不看标题，也不固定等。
+    # 余额按钮只要求出现：余额为 0 时它显示「充值」而不是数字
     try:
         # 先挂上监听再跳转，账号信息请求无论早晚都不会漏
         with page.expect_response(lambda r: USER_ME_API in r.url, timeout=config.NAV_TIMEOUT_MS) as me_info:
@@ -167,7 +167,7 @@ class LikeNotReady(Exception):
 
 
 def clicks_for_likes(n: int) -> int:
-    """\u6309 200ms \u8282\u594f\u63a8\u7b97\u8981\u5355\u51fb\u51e0\u4e0b\u624d\u5f97\u5230 n \u4e2a\u8d5e\uff1a\u6bcf\u8f6e 5 \u4e0b 3 \u8d5e\uff0c\u6700\u540e\u4e00\u8f6e\u4e0d\u7528\u70b9\u9000\u51fa\u3002"""
+    """按 200ms 节奏推算要单击几下才得到 n 个赞：每轮 5 下 3 赞，最后一轮不用点退出。"""
     q, r = divmod(n, 3)
     if r == 0:
         return max(5 * q - 1, 0)
@@ -180,21 +180,21 @@ def _like_count(url: str) -> int:
 
 
 def do_like(page: Page, target: int) -> dict:
-    """\u6bcf 200ms \u5355\u51fb\u4e00\u6b21\u76f4\u64ad\u753b\u9762\u70b9\u8d5e\uff0c\u88ab\u906e\u6321\u65f6\u6682\u505c\u3002
-    \u8fd4\u56de clicks\uff08\u5b9e\u9645\u5355\u51fb\u6b21\u6570\uff09\u3001accepted\uff08\u670d\u52a1\u5668\u63a5\u53d7\u7684\u8d5e\u6570\uff09\u3001batches\uff08\u6bcf\u4e2a\u70b9\u8d5e\u8bf7\u6c42\u7684\u7ed3\u679c\uff09\u3001
-    paused\uff08\u56e0\u906e\u6321\u6682\u505c\u7684\u79d2\u6570\uff09\u3001stopped\uff08\u906e\u6321\u592a\u4e45\u800c\u4e2d\u6b62\u7684\u539f\u56e0\uff0c\u6ca1\u6709\u5219\u4e3a None\uff09\u3002"""
+    """每 200ms 单击一次直播画面点赞，被遮挡时暂停。
+    返回 clicks（实际单击次数）、accepted（服务器接受的赞数）、batches（每个点赞请求的结果）、
+    paused（因遮挡暂停的秒数）、stopped（遮挡太久而中止的原因，没有则为 None）。"""
     try:
         page.wait_for_function(LIKE_READY_JS, timeout=20000)
     except PWTimeout:
-        raise LikeNotReady("\u70b9\u8d5e\u7ec4\u4ef6 20 \u79d2\u5185\u672a\u52a0\u8f7d\uff0c\u672a\u70b9\u51fb") from None
-    # \u6709\u610f\u4fdd\u7559\u7684\u4f59\u91cf\uff1a\u811a\u672c\u52a0\u8f7d\u5b8c\u5230\u7ec4\u4ef6\u6302\u5230\u9875\u9762\u4e0a\u8fd8\u8981\u4e00\u70b9\u65f6\u95f4\uff0c\u800c\u7ec4\u4ef6\u5143\u7d20\u53ea\u6709\u54c8\u5e0c\u7c7b\u540d\uff08PPcGIai7\uff09\uff0c\u6ca1\u6709\u7a33\u5b9a\u6807\u8bb0\u53ef\u7b49
+        raise LikeNotReady("点赞组件 20 秒内未加载，未点击") from None
+    # 有意保留的余量：脚本加载完到组件挂到页面上还要一点时间，而组件元素只有哈希类名（PPcGIai7），没有稳定标记可等
     page.wait_for_timeout(1000)
 
     player = page.locator(PLAYER_SELECTOR).first
     player.wait_for(state="visible", timeout=config.ACTION_TIMEOUT_MS)
     box = player.bounding_box()
     if not box:
-        raise RuntimeError("\u672a\u627e\u5230\u76f4\u64ad\u753b\u9762\u533a\u57df")
+        raise RuntimeError("未找到直播画面区域")
     cx = box["x"] + box["width"] / 2
     cy = box["y"] + box["height"] / 2
 
@@ -210,7 +210,7 @@ def do_like(page: Page, target: int) -> dict:
         done, paused, stopped = 0, 0.0, None
         start = time.monotonic()
         for i in range(clicks):
-            # \u6309\u7edd\u5bf9\u65f6\u523b\u6392\u7a0b\uff0c\u907f\u514d\u6bcf\u6b21\u70b9\u51fb\u7684\u8017\u65f6\u7d2f\u52a0\u628a\u95f4\u9694\u62d6\u8fc7 250ms
+            # 按绝对时刻排程，避免每次点击的耗时累加把间隔拖过 250ms
             delay = start + i * LIKE_CLICK_INTERVAL_MS / 1000 - time.monotonic()
             if delay > 0:
                 page.wait_for_timeout(delay * 1000)
@@ -228,7 +228,7 @@ def do_like(page: Page, target: int) -> dict:
                     start += waited
             page.mouse.click(cx, cy)
             done += 1
-        # \u6700\u540e\u4e00\u6279\u5728\u6700\u540e\u4e00\u6b21\u70b9\u8d5e\u7ea6 2 \u79d2\u540e\u624d\u53d1\uff1b\u8fde\u7eed 4 \u79d2\u6ca1\u6709\u65b0\u8bf7\u6c42\u5c31\u8ba4\u4e3a\u53d1\u5b8c\u4e86
+        # 最后一批在最后一次点赞约 2 秒后才发；连续 4 秒没有新请求就认为发完了
         quiet_since, seen = time.monotonic(), 0
         deadline = quiet_since + 15
         while time.monotonic() < deadline and time.monotonic() - quiet_since < 4:
@@ -247,7 +247,7 @@ def do_like(page: Page, target: int) -> dict:
         data = body.get("data") if isinstance(body.get("data"), dict) else {}
         reason = data.get("prompts") or ""
         if resp.headers.get("bdturing-verify"):
-            reason = reason or "\u89e6\u53d1\u98ce\u63a7\u9a8c\u8bc1\u7801"
+            reason = reason or "触发风控验证码"
         batches.append({"count": _like_count(resp.url), "status_code": body.get("status_code"), "reason": reason})
 
     accepted = sum(b["count"] for b in batches if b["status_code"] == 0)
@@ -280,8 +280,8 @@ def wait_balance(page: Page, timeout_ms: int = 20000, below: int | None = None) 
 
 
 def read_gift_price(tile: Locator) -> int | None:
-    # \u793c\u7269\u5757\u4e0b\u65b9\u663e\u793a\u5355\u4ef7\uff0c\u5982\u300c\u68d2\u68d2\u7cd6 9\u94bb\u300d
-    m = re.search(r"(\d+)\s*\u94bb", tile.inner_text())
+    # 礼物块下方显示单价，如「棒棒糖 9钻」
+    m = re.search(r"(\d+)\s*钻", tile.inner_text())
     return int(m.group(1)) if m else None
 
 
@@ -290,18 +290,18 @@ class InsufficientBalance(Exception):
 
 
 def prepare_gift(page: Page, name: str) -> tuple[Locator, int, int]:
-    """\u5b9a\u4f4d\u793c\u7269\u5e76\u8bfb\u51fa\u5355\u4ef7\u548c\u4f59\u989d\uff0c\u4e0d\u505a\u4efb\u4f55\u70b9\u51fb\uff1b\u4f59\u989d\u4e0d\u8db3\u65f6\u629b InsufficientBalance\u3002"""
+    """定位礼物并读出单价和余额，不做任何点击；余额不足时抛 InsufficientBalance。"""
     # 名字必须完全相等：has_text 是包含匹配，「抖音」会选中 10001 钻的「抖音1号」
     tile = page.locator('[class*="gift_item_gift_bar"]').filter(has=page.get_by_text(name, exact=True)).first
     tile.wait_for(state="attached", timeout=config.ACTION_TIMEOUT_MS)
     price = read_gift_price(tile)
     if not price:
-        raise RuntimeError(f"\u672a\u80fd\u4ece\u793c\u7269\u5757\u8bfb\u5230\u300c{name}\u300d\u7684\u4ef7\u683c\uff08\u6216\u4e3a\u514d\u8d39\u793c\u7269\uff09\uff0c\u65e0\u6cd5\u7528\u4f59\u989d\u6821\u9a8c\u662f\u5426\u9001\u51fa")
+        raise RuntimeError(f"未能从礼物块读到「{name}」的价格（或为免费礼物），无法用余额校验是否送出")
     before = wait_balance(page)
     if before is None:
-        raise RuntimeError("\u672a\u80fd\u8bfb\u53d6\u94bb\u77f3\u4f59\u989d\uff0c\u65e0\u6cd5\u5224\u5b9a\u662f\u5426\u9001\u51fa")
+        raise RuntimeError("未能读取钻石余额，无法判定是否送出")
     if before < price:
-        raise InsufficientBalance(f"\u4f59\u989d\u4e0d\u8db3\uff1a{before} \u94bb < {name}\u5355\u4ef7 {price} \u94bb\uff0c\u672a\u70b9\u51fb\u8d60\u9001")
+        raise InsufficientBalance(f"余额不足：{before} 钻 < {name}单价 {price} 钻，未点击赠送")
     return tile, price, before
 
 
@@ -315,7 +315,7 @@ def _json(resp: Response) -> dict:
 
 def do_gift(page: Page, name: str, qty: int) -> tuple[int, int, int]:
     if qty != 1:
-        raise ValueError("\u5f53\u524d\u811a\u672c\u53ea\u652f\u6301\u5355\u4e2a\u9001\u793c\uff0cqty \u56fa\u5b9a\u4e3a 1")
+        raise ValueError("当前脚本只支持单个送礼，qty 固定为 1")
 
     tile, price, before = prepare_gift(page, name)
     # 礼物块收到「鼠标进入」150ms 后才显示赠送按钮；但礼物栏的「当前选中」一被页面改动（刚加载时会发生），
@@ -351,28 +351,28 @@ def do_gift(page: Page, name: str, qty: int) -> tuple[int, int, int]:
         page.mouse.move(5, 5)
 
     if "send" not in got:
-        raise RuntimeError("\u70b9\u51fb\u8d60\u9001\u540e 15 \u79d2\u5185\u6ca1\u6709\u6536\u5230\u9001\u793c\u63a5\u53e3\u7684\u56de\u590d\uff0c\u65e0\u6cd5\u786e\u8ba4\u662f\u5426\u9001\u51fa")
+        raise RuntimeError("点击赠送后 15 秒内没有收到送礼接口的回复，无法确认是否送出")
     body = _json(got["send"])
     data = body.get("data") if isinstance(body.get("data"), dict) else {}
     if body.get("status_code") != 0:
-        reason = data.get("prompts") or ("\u89e6\u53d1\u98ce\u63a7\u9a8c\u8bc1\u7801" if got["send"].headers.get("bdturing-verify") else "")
-        raise RuntimeError(f"\u9001\u793c\u88ab\u670d\u52a1\u5668\u62d2\u7edd\uff1a{reason or 'status_code=' + str(body.get('status_code'))}")
+        reason = data.get("prompts") or ("触发风控验证码" if got["send"].headers.get("bdturing-verify") else "")
+        raise RuntimeError(f"送礼被服务器拒绝：{reason or 'status_code=' + str(body.get('status_code'))}")
     unit = (data.get("gift_struct") or {}).get("diamond_count")
     if unit is not None and unit != price:
-        raise RuntimeError(f"\u670d\u52a1\u5668\u8bb0\u5f55\u7684\u793c\u7269\u5355\u4ef7\u662f {unit} \u94bb\uff0c\u4e0d\u662f\u9875\u9762\u4e0a\u7684 {price} \u94bb\uff0c\u53ef\u80fd\u9001\u9519\u4e86\u793c\u7269")
+        raise RuntimeError(f"服务器记录的礼物单价是 {unit} 钻，不是页面上的 {price} 钻，可能送错了礼物")
 
     wallet = _json(got["wallet"]) if "wallet" in got else {}
     after = (wallet.get("data") or {}).get("diamond") if wallet.get("status_code") == 0 else None
     if after is None:
-        # \u6ca1\u7b49\u5230\u94b1\u5305\u63a5\u53e3\u65f6\uff0c\u9000\u56de\u7b49\u9875\u9762\u4e0a\u7684\u4f59\u989d\u53d8\u5c0f
+        # 没等到钱包接口时，退回等页面上的余额变小
         after = wait_balance(page, timeout_ms=10000, below=before)
     if after is None:
-        raise RuntimeError("\u670d\u52a1\u5668\u5df2\u786e\u8ba4\u9001\u51fa\uff0c\u4f46\u8bfb\u4e0d\u5230\u9001\u793c\u540e\u7684\u4f59\u989d\uff0c\u65e0\u6cd5\u6838\u5bf9\u6263\u8d39")
+        raise RuntimeError("服务器已确认送出，但读不到送礼后的余额，无法核对扣费")
 
     delta = before - after
     if delta != price:
-        hint = "\u53ef\u80fd\u8fdb\u5165\u4e86\u8fde\u51fb" if delta > price else "\u53ef\u80fd\u672a\u9001\u51fa\u6216\u4f59\u989d\u672a\u5237\u65b0"
-        raise RuntimeError(f"\u9001\u793c\u6263\u8d39 {delta} \u94bb\uff0c\u671f\u671b {price} \u94bb\uff08{hint}\uff09")
+        hint = "可能进入了连击" if delta > price else "可能未送出或余额未刷新"
+        raise RuntimeError(f"送礼扣费 {delta} 钻，期望 {price} 钻（{hint}）")
     return delta, before, after
 
 
@@ -407,78 +407,78 @@ def main() -> int:
 
         try:
             assert_session(ctx)
-            steps.add("\u6821\u9a8c\u767b\u5f55\u6001", "PASS", "cookie sessionid \u5b58\u5728\uff08\u9884\u68c0\uff0c\u8fdb\u76f4\u64ad\u95f4\u540e\u4ee5\u63a5\u53e3\u4e3a\u51c6\uff09")
+            steps.add("校验登录态", "PASS", "cookie sessionid 存在（预检，进直播间后以接口为准）")
 
             target = open_target_profile(page, config.TARGET_SEC_UID, config.TARGET_DOUYIN_ID)
-            steps.add("\u6253\u5f00\u76ee\u6807\u4e3b\u9875", "PASS", f"{target['name']} / {target['douyin_id']}\uff08\u5df2\u6838\u5bf9\u6296\u97f3\u53f7\uff09")
+            steps.add("打开目标主页", "PASS", f"{target['name']} / {target['douyin_id']}（已核对抖音号）")
             shot(page, "02_target")
 
             if not target["web_rid"]:
-                steps.add("\u76f4\u64ad\u72b6\u6001", "WARN", "\u672a\u5f00\u64ad\uff0c\u6d41\u7a0b\u7ec8\u6b62")
+                steps.add("直播状态", "WARN", "未开播，流程终止")
                 raise SystemExit(2)
 
-            steps.add("\u76f4\u64ad\u72b6\u6001", "PASS", f"\u76f4\u64ad\u95f4\u53f7 {target['web_rid']}")
+            steps.add("直播状态", "PASS", f"直播间号 {target['web_rid']}")
 
             me = open_live(page, target["web_rid"])
-            steps.add("\u8fdb\u5165\u76f4\u64ad\u95f4", "PASS", page.title())
+            steps.add("进入直播间", "PASS", page.title())
             shot(page, "03_live")
 
-            # \u9001\u793c\u3001\u70b9\u8d5e\u4e4b\u524d\u6838\u5bf9\u767b\u5f55\u72b6\u6001\u548c\u8d26\u53f7\uff0c\u4e0d\u5bf9\u5c31\u505c\u6b62
+            # 送礼、点赞之前核对登录状态和账号，不对就停止
             nickname, my_id = check_account(me, config.MY_DOUYIN_ID)
-            steps.add("\u786e\u8ba4\u767b\u5f55\u8d26\u53f7", "PASS", f"{nickname} / {my_id}\uff08\u4e0e\u914d\u7f6e\u4e00\u81f4\uff09")
+            steps.add("确认登录账号", "PASS", f"{nickname} / {my_id}（与配置一致）")
 
             balance = wait_balance(page)
             steps.add(
-                "\u8d26\u6237\u94bb\u77f3\u4f59\u989d",
+                "账户钻石余额",
                 "PASS" if balance is not None else "WARN",
-                f"\u5f53\u524d {balance} \u94bb" if balance is not None else "\u672a\u8bfb\u53d6\u5230\u4f59\u989d",
+                f"当前 {balance} 钻" if balance is not None else "未读取到余额",
             )
 
             if not args.skip_gift:
                 try:
                     delta, before, after = do_gift(page, args.gift, config.GIFT_QTY)
                 except InsufficientBalance as exc:
-                    steps.add("\u8d60\u9001\u793c\u7269", "WARN", str(exc))
+                    steps.add("赠送礼物", "WARN", str(exc))
                 else:
                     steps.add(
-                        "\u8d60\u9001\u793c\u7269",
+                        "赠送礼物",
                         "PASS",
-                        f"{args.gift} x{config.GIFT_QTY}\uff0c\u670d\u52a1\u5668\u786e\u8ba4\u9001\u51fa\uff1b\u94bb {before} \u2192 {after}\uff08\u6263 {delta}\uff09",
+                        f"{args.gift} x{config.GIFT_QTY}，服务器确认送出；钻 {before} → {after}（扣 {delta}）",
                     )
                     shot(page, "04_gift")
             else:
-                steps.add("\u8d60\u9001\u793c\u7269", "SKIP", "\u6309\u53c2\u6570\u8df3\u8fc7")
+                steps.add("赠送礼物", "SKIP", "按参数跳过")
 
             if not args.skip_like:
                 try:
                     like = do_like(page, args.likes)
                     clicks, accepted, batches = like["clicks"], like["accepted"], like["batches"]
                 except LikeNotReady as exc:
-                    steps.add("\u70b9\u8d5e", "WARN", str(exc))
+                    steps.add("点赞", "WARN", str(exc))
                 else:
-                    detail = f"\u5355\u51fb {clicks} \u4e0b\uff0c\u76ee\u6807 {args.likes}\uff0c\u670d\u52a1\u5668\u63a5\u53d7 {accepted}\uff08{len(batches)} \u4e2a\u8bf7\u6c42\uff09"
+                    detail = f"单击 {clicks} 下，目标 {args.likes}，服务器接受 {accepted}（{len(batches)} 个请求）"
                     rejected = [b for b in batches if b["status_code"] != 0]
                     if rejected:
-                        reasons = "\u3001".join(sorted({b["reason"] or f"status_code={b['status_code']}" for b in rejected}))
-                        detail += f"\uff1b\u88ab\u62d2 {sum(b['count'] for b in rejected)} \u6b21\uff1a{reasons}"
+                        reasons = "、".join(sorted({b["reason"] or f"status_code={b['status_code']}" for b in rejected}))
+                        detail += f"；被拒 {sum(b['count'] for b in rejected)} 次：{reasons}"
                     if like["paused"] >= 0.1 and not like["stopped"]:
                         detail += f"；画面被遮挡，暂停 {like['paused']:.1f} 秒"
                     if like["stopped"]:
                         detail += f"；{like['stopped']}"
                     status = "PASS" if accepted > 0 and not rejected and not like["stopped"] else "WARN"
-                    steps.add("\u70b9\u8d5e", status, detail)
+                    steps.add("点赞", status, detail)
                     shot(page, "05_like")
             else:
-                steps.add("\u70b9\u8d5e", "SKIP", "\u6309\u53c2\u6570\u8df3\u8fc7")
+                steps.add("点赞", "SKIP", "按参数跳过")
 
             final_balance = read_balance(page)
             if final_balance is not None:
-                steps.add("\u7ed3\u675f\u4f59\u989d", "PASS", f"{final_balance} \u94bb")
+                steps.add("结束余额", "PASS", f"{final_balance} 钻")
 
         except SystemExit:
             raise
         except Exception as exc:
-            steps.add("\u5f02\u5e38\u4e2d\u65ad", "FAIL", f"{type(exc).__name__}: {exc}")
+            steps.add("异常中断", "FAIL", f"{type(exc).__name__}: {exc}")
             try:
                 shot(page, "99_error")
             except Exception:

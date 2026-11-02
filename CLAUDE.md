@@ -75,5 +75,5 @@ python douyin_test/run_e2e.py --skip-gift
 ## 其他
 
 - `.playwright-mcp/` 是用 Playwright MCP 探索页面时留下的控制台日志和可访问性快照，不是项目代码（已 gitignore）。
-- `run_e2e.py` 中约 60 行中文以字面 `\uXXXX` 转义存储（字符串和 docstring 运行时正常，注释不可读），较新的代码直接写中文。用 Edit 修改这些行时要按转义原文匹配。
+- 源码中的中文（注释、字符串、docstring）直接写 UTF-8 字符，不要写成 `\uXXXX` 转义。
 - 在页面里执行的 JS 写在 Python 普通三引号字符串里，JS 正则的反斜杠要写两个（`\\s`、`\\d`）；`wait_balance()` 里拼的是 f-string，JS 花括号要写成 `{{ }}`。
