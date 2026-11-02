@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import multiprocessing
+import os
 import re
 import sys
 import threading
@@ -269,26 +270,53 @@ class Wallet:
         return self.diamond if self.seq > seen else None
 
 
-def open_live(page: Page, web_rid: str) -> tuple[dict, Wallet]:
-    """进直播间并等到后面要用的元素出现。
-    返回页面自己请求的 /webcast/user/me/ 回复（供 check_account 核对），以及跟踪钱包接口的 Wallet。"""
+def wait_rounds(what: str, wait_once: Callable[[int], bool], emit: Emit) -> bool:
+    """每轮最多等 NAV_TIMEOUT_MS，没等到就提示一声接着等，共 WAIT_ROUNDS 轮；不刷新页面、不重进直播间。
+    返回是否等到。网速慢时用（用户要求：等不到就继续等，不要刷新）。"""
+    wait_s = config.NAV_TIMEOUT_MS // 1000
+    for round_no in range(1, config.WAIT_ROUNDS + 1):
+        if wait_once(config.NAV_TIMEOUT_MS):
+            return True
+        if round_no < config.WAIT_ROUNDS:
+            emit(f"{what}等了 {wait_s * round_no} 秒还没有，继续等待（不刷新页面）")
+    return False
+
+
+def rounds_seconds() -> int:
+    return config.NAV_TIMEOUT_MS // 1000 * config.WAIT_ROUNDS
+
+
+def open_live(page: Page, web_rid: str, emit: Emit) -> tuple[dict, Wallet]:
+    """进直播间并等到后面要用的东西：直播画面和页面自己请求的 /webcast/user/me/。
+    返回该接口的回复（供 check_account 核对），以及跟踪钱包接口的 Wallet。"""
     # 直播页资源有几百个，默认只记 250 条资源计时，晚加载的 LiveLike 脚本会记不进去
     page.add_init_script("performance.setResourceTimingBufferSize(5000)")
-    # 先挂上监听再跳转，账号信息和余额的请求无论早晚都不会漏
+    # 先挂上监听再跳转，账号信息和余额的请求无论早晚都不会漏；收到就解析，只留第一次的回复
     wallet = Wallet(page)
-    ready = False
-    # 只等直播画面（点赞要用）。礼物栏留到送礼那一步再等：网速慢时它可能很久才出来，不能拖累点赞。
-    # 不看标题，也不固定等；余额看钱包接口，不等余额按钮
+    me: list[dict] = []
+
+    def on_response(resp: Response) -> None:
+        if USER_ME_API in resp.url and not me:
+            me.append(_json(resp))
+
+    def me_arrived(timeout_ms: int) -> bool:
+        deadline = time.monotonic() + timeout_ms / 1000
+        while not me and time.monotonic() < deadline:
+            page.wait_for_timeout(200)
+        return bool(me)
+
+    page.on("response", on_response)
     try:
-        with page.expect_response(lambda r: USER_ME_API in r.url, timeout=config.NAV_TIMEOUT_MS) as me_info:
-            page.goto(config.LIVE_URL.format(web_rid=web_rid), wait_until="domcontentloaded")
-            page.wait_for_selector(PLAYER_SELECTOR, timeout=config.NAV_TIMEOUT_MS)
-            ready = True
-    except PWTimeout:
-        if not ready:
-            raise
-        raise RuntimeError(f"进直播间后 {config.NAV_TIMEOUT_MS // 1000} 秒内没等到当前账号信息（{USER_ME_API}）") from None
-    return _json(me_info.value), wallet
+        # 只等直播画面（点赞要用）。礼物栏留到送礼那一步再等：网速慢时它可能很久才出来，不能拖累点赞。
+        # 不看标题，也不固定等；余额看钱包接口，不等余额按钮
+        page.goto(config.LIVE_URL.format(web_rid=web_rid), wait_until="domcontentloaded")
+        page.wait_for_selector(PLAYER_SELECTOR, timeout=config.NAV_TIMEOUT_MS)
+        # 网速慢、几个账号同时进房时，账号信息可能 45 秒后才回来（实测三个账号并行时两个超时），分轮继续等
+        if not wait_rounds(f"账号信息接口（{USER_ME_API}）", me_arrived, emit):
+            raise RuntimeError(f"直播画面出来后又等了 {rounds_seconds()} 秒，仍没等到当前账号信息（{USER_ME_API}），可能网速慢")
+    finally:
+        page.remove_listener("response", on_response)
+    return me[0], wallet
 
 
 class LikeNotReady(Exception):
@@ -397,34 +425,26 @@ class GiftNotReady(Exception):
     """送礼前要等的东西（礼物栏、钱包接口的余额）等了几轮还没有。属于预期内的慢，只记送礼 FAIL、不打堆栈。"""
 
 
-def wait_rounds(what: str, wait_once: Callable[[int], bool], emit: Emit) -> None:
-    """每轮最多等 NAV_TIMEOUT_MS，没等到就提示一声接着等，共 GIFT_WAIT_ROUNDS 轮；不刷新页面、不重进直播间。"""
-    wait_s = config.NAV_TIMEOUT_MS // 1000
-    rounds = config.GIFT_WAIT_ROUNDS
-    for round_no in range(1, rounds + 1):
-        if wait_once(config.NAV_TIMEOUT_MS):
-            return
-        if round_no < rounds:
-            emit(f"{what}等了 {wait_s * round_no} 秒还没有，继续等待（不刷新页面）")
-    raise GiftNotReady(f"{what}等了 {wait_s * rounds} 秒仍没有（可能网速慢），未送礼")
-
-
-def wait_gift_ready(page: Page, wallet: Wallet, emit: Emit) -> None:
-    """送礼前等礼物栏出来、钱包接口回来。进房时余额只短等过，网速慢时钱包接口可能还没回来。"""
-
-    def gift_bar_shown(timeout_ms: int) -> bool:
+def gift_bar_shown(page: Page) -> Callable[[int], bool]:
+    def wait_once(timeout_ms: int) -> bool:
         try:
             page.wait_for_selector(GIFT_BAR_SELECTOR, timeout=timeout_ms)
             return True
         except PWTimeout:
             return False
 
-    wait_rounds("礼物栏", gift_bar_shown, emit)
-    if wallet.diamond is None:
-        try:
-            wait_rounds(f"钱包接口（{WALLET_API}）的余额", lambda ms: wallet.wait_new(0, ms) is not None, emit)
-        except GiftNotReady as exc:
-            raise GiftNotReady(f"{exc}（最近一次失败：{wallet.error}）" if wallet.error else str(exc)) from None
+    return wait_once
+
+
+def wait_gift_ready(page: Page, wallet: Wallet, emit: Emit) -> None:
+    """送礼前等礼物栏出来、钱包接口回来。进房时余额只短等过，网速慢时钱包接口可能还没回来。"""
+    if not wait_rounds("礼物栏", gift_bar_shown(page), emit):
+        raise GiftNotReady(f"礼物栏等了 {rounds_seconds()} 秒仍没有（可能网速慢），未送礼")
+    if wallet.diamond is None and not wait_rounds(
+        f"钱包接口（{WALLET_API}）的余额", lambda ms: wallet.wait_new(0, ms) is not None, emit
+    ):
+        why = f"（最近一次失败：{wallet.error}）" if wallet.error else ""
+        raise GiftNotReady(f"钱包接口（{WALLET_API}）的余额等了 {rounds_seconds()} 秒仍没有（可能网速慢）{why}，未送礼")
 
 
 def prepare_gift(page: Page, wallet: Wallet, name: str) -> tuple[Locator, int, int]:
@@ -632,7 +652,7 @@ def run_account(account: Account, web_rid: str, args: argparse.Namespace, emit: 
                 assert_session(ctx)
                 steps.add("校验登录态", "PASS", "cookie 齐全（预检，进直播间后以接口为准）")
 
-                me, wallet = open_live(page, web_rid)
+                me, wallet = open_live(page, web_rid, emit)
                 steps.add("进入直播间", "PASS", page.title())
                 shot(page, folder, "03_live", emit)
 
@@ -718,6 +738,14 @@ class Run:
         return status, code, "；".join(parts)
 
 
+def relative_to_report(path: Path) -> str:
+    """报告里写相对报告所在目录的路径；不在同一个盘时写绝对路径。"""
+    try:
+        return Path(os.path.relpath(path, config.REPORT_FILE.parent)).as_posix()
+    except ValueError:
+        return str(path)
+
+
 def render_report(run: Run) -> str:
     skipped = "（本次跳过）"
     status, _, summary = run.summary()
@@ -730,7 +758,7 @@ def render_report(run: Run) -> str:
         f"- 目标抖音号：{config.TARGET_DOUYIN_ID}" + (f"，直播间号 {run.web_rid}" if run.web_rid else ""),
         f"- 礼物：{run.args.gift} x{config.GIFT_QTY}" + (skipped if run.args.skip_gift else ""),
         f"- 目标点赞数：{run.args.likes}" + (skipped if run.args.skip_like else ""),
-        f"- 日志：{run.log_path.relative_to(config.ROOT).as_posix()}",
+        f"- 日志：{relative_to_report(run.log_path)}",
         "",
         "## 汇总",
         "",
@@ -754,7 +782,8 @@ def render_report(run: Run) -> str:
     return "\n".join(lines) + "\n"
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """argv 为 None 时读命令行；poll.py 会传入要转给每一轮的参数，先在这里检查一遍。"""
     parser = argparse.ArgumentParser(description="抖音直播间互动链路测试（多账号）")
     parser.add_argument("--accounts", help="要运行的账号，逗号分隔；可写文件名（昵称_抖音号）、昵称或抖音号")
     parser.add_argument("--all", action="store_true", help="运行 auth/ 里的全部账号")
@@ -763,7 +792,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gift", default=config.GIFT_NAME)
     parser.add_argument("--skip-gift", action="store_true")
     parser.add_argument("--skip-like", action="store_true")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 class SelectionError(Exception):

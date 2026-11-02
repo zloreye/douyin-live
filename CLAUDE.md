@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-基于 Playwright（Python sync API）的抖音 PC 端直播间互动链路端到端测试，支持多账号：预检各账号的 cookie 文件 → 用 sec_uid 打开目标主播主页（整次运行只打开一次）核对抖音号、从「直播中」链接取直播间号 → 各账号（串行或并行）进直播间并核对当前登录账号 → 送礼 → 点赞，最后输出一份 Markdown 总报告、按账号分目录的截图和日志文件。代码全部在 `douyin_test/`，没有依赖清单、单元测试和 lint 配置。
+基于 Playwright（Python sync API）的抖音 PC 端直播间互动链路端到端测试，支持多账号：预检各账号的 cookie 文件 → 用 sec_uid 打开目标主播主页（整次运行只打开一次）核对抖音号、从「直播中」链接取直播间号 → 各账号（串行或并行）进直播间并核对当前登录账号 → 送礼 → 点赞，最后输出一份 Markdown 总报告、按账号分目录的截图和日志文件。`poll.py` 可以按固定间隔定时反复运行这条链路。代码全部在 `douyin_test/`，没有依赖清单、单元测试和 lint 配置。
 
 ## 常用命令
 
@@ -37,22 +37,34 @@ python douyin_test/run_e2e.py --all --skip-gift
 - 其它参数：`--likes N`、`--gift <礼物名>`、`--skip-gift`、`--skip-like`，默认值来自 `config.py`，对所有账号相同。
 - 没有单独跑某一步的入口：预检、打开主页、进直播间、核对账号总会执行，送礼/点赞用 `--skip-*` 开关组合。
 - 退出码按所有账号和目标主页步骤里最差的结果汇总（`overall()`）：0 全部 PASS/SKIP；2 有 WARN（含目标未开播）；1 有 FAIL（含 cookie 失效）。某个账号出错只记 FAIL、把堆栈写进日志，不影响其他账号。`auth/` 里没有账号或 `--accounts` 写错时只打印提示，以 1 退出，不写报告。
+定时轮询（常驻运行，Ctrl+C 停止；除时间参数外其余参数原样转给每一轮的 `run_e2e.py`）：
+
+```bash
+python douyin_test/poll.py --every 1h --all --skip-gift
+```
+
+- 时间参数：`--every`（如 `1h`、`30m`、`1h30m`，不少于 `poll.MIN_INTERVAL_MIN` = 5 分钟）、`--start`（第一轮时间，`HH:MM` 今天已过就是明天，或 `"YYYY-MM-DD HH:MM"`；不填立即开始）、`--until`（到点不再开始新一轮）、`--times`（最多几轮）。
+- 每轮在「第一轮时刻 + n × 间隔」开始，不随耗时漂移；上一轮没跑完不会同时开下一轮，跑完立即开始，期间错过的时刻跳过。
+- 不带 `--accounts` / `--all` 时启动时弹一次菜单，选择换成 `--accounts <抖音号>` 和 `--mode` 用于每一轮；账号写法在启动时就检查，不等第一轮才报错。
+- 退出码按最差的一轮：有 FAIL、中断或没生成报告为 1，有 WARN 为 2，否则 0。
+
 - 脚本用 `import config` / `import accounts`，从任意目录运行都可以；路径都在 `config.py` 里相对文件解析。
 - 能离线做的只有语法检查 `python -m py_compile douyin_test/*.py`，以及 `accounts.py`、选账号、报告渲染这类不碰浏览器的函数；其余改动只能真机运行验证。
 
 ## 运行前注意
 
 - `run_e2e.py` 每次运行都会用真实账号进入真实直播间点赞（每个账号默认 20 赞），不要在用户没要求时运行。
-- **送礼消耗账号真实钻石**，多个账号就扣多份。除非用户明确要求送礼，运行 `run_e2e.py` 一律加 `--skip-gift`。
+- **送礼消耗账号真实钻石**，多个账号就扣多份，`poll.py` 还会每一轮都扣。除非用户明确要求送礼，运行 `run_e2e.py` 和 `poll.py` 一律加 `--skip-gift`（`poll.py` 没加时启动会提示）。
 - 点赞过快会被服务端拒绝（页面提示「您手速太快了」）或触发风控验证码（响应头 `bdturing-verify`），不要随意缩短点击间隔或频繁重复运行；并行模式下多个账号同时点赞，风险更高。
 - 用户网速较慢：两个账号并行时进房从约 30 秒变成约 50 秒。不要随意缩短超时。
-- `auth/*.json` 是真实账号的登录 cookie，`report.md`、`shots/`、`logs/` 含昵称、抖音号、钻石余额；都已 gitignore，不要输出 cookie 内容，也不要提交这些文件。
+- `auth/*.json` 是真实账号的登录 cookie，`report.md`、`shots/`、`logs/`、`runs/` 含昵称、抖音号、钻石余额；都已 gitignore，不要输出 cookie 内容，也不要提交这些文件。
 - 只能在 `www.douyin.com` 扫码；`test.douyin.com` 会返回 `error_code 1069`。
 - 首屏有 WAF PoW 挑战（`_wafchallengeid`），`HEADLESS=True` 容易卡住，保持有头模式（`login_qr.py` 始终有头）。
 
 ## 架构
 
-- `config.py`：目标主播身份（`TARGET_SEC_UID` + `TARGET_DOUYIN_ID`）、礼物名、点赞数、超时、视口、浏览器通道和产物路径（`AUTH_DIR`、`SHOT_DIR`、`REPORT_FILE`、`LOG_DIR`）。
+- `config.py`：目标主播身份（`TARGET_SEC_UID` + `TARGET_DOUYIN_ID`）、礼物名、点赞数、超时、视口、浏览器通道和产物路径（`AUTH_DIR`、`SHOT_DIR`、`REPORT_FILE`、`LOG_DIR`、`RUNS_DIR`）。设置了环境变量 `DOUYIN_RUN_DIR` 时，`SHOT_DIR`、`REPORT_FILE`、`LOG_DIR` 都改到这个目录下（`poll.py` 用它让每轮单独一个目录；并行子进程会继承环境变量，所以必须用环境变量而不是命令行参数）。
+- `poll.py`：定时轮询。每轮用子进程跑 `run_e2e.py`，设置 `DOUYIN_RUN_DIR=runs/<时间>/`，并把子进程的完整终端输出边显示边存成该目录的 `console.log`（`PYTHONIOENCODING=utf-8`，能存下日志文件打开前的报错和未捕获的异常）。每轮目录全部保留：`report.md`、`shots/`、`run_<时间>.log`、`console.log`。另写 `runs/poll_<启动时间>.md`（每轮一行：计划时间、实际开始、用时、结果、报告链接，每轮结束后重写）和 `runs/poll_<启动时间>.log`。每轮的结果从该轮 `report.md` 的「总体结果」行读取。Ctrl+C 时等这一轮的 `run_e2e.py` 写完报告（最多 60 秒）再退出。`sleep_until()` 按墙上时间分段睡，电脑睡眠唤醒后时间已过就立即开始。
 - `accounts.py`：账号文件的命名、解析和预检。文件名 `<昵称>_<抖音号>.json` 就是账号的唯一记录：昵称里的 `_` 和 Windows 文件名不允许的字符都换成 `-`，所以第一个 `_` 前是昵称、后面是抖音号（抖音号本身可以含 `_`）。不是这个格式的文件（如旧的 `state.json`）不会被当成账号。`cookie_problem()` 不开浏览器先看登录 cookie 有没有、过没过期；`relogin_hint()` 生成写明账号的「【cookie 失效】」提示。
 - `login_qr.py`：扫码登录。点「登录」后最多等 30 秒弹框、最多点 3 次（网速慢，且点「登录」偶尔会整页刷新不弹框），仍不行就提示用户手动点；扫码后用户在终端按回车，脚本检查 `sessionid` + `sid_tt`，再打开 `/user/self` 读昵称和抖音号，保存 `storage_state`。同一抖音号只留一个文件，改过昵称会删掉旧文件。
 - `run_e2e.py`：`main()` 选账号 → 清空 `shots/` → 打开日志 `logs/run_<时间>.log` → 预检 cookie 文件（失效的直接记 FAIL，不开浏览器）→ `resolve_target()` 借用第一个可用账号的 cookie 打开目标主页（整次只一次）→ 每个账号跑 `run_account()`（串行在本进程，并行用 `ProcessPoolExecutor`）→ `finally` 里无论成败都覆盖写入 `report.md`。
