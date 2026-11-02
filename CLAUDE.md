@@ -64,6 +64,7 @@ python douyin_test/run_e2e.py --skip-gift
 聊天区的「送出了…」「为主播点赞了」任何观众都会触发，不能用来判定，一律看接口回复：
 
 - **送礼**：两步操作，先悬停礼物块浮出 `[data-e2e="gift-btn"]` 再点它（按钮没出现就移开鼠标重新悬停，最多 5 次）。礼物按名字精确匹配（`exact=True`，否则「抖音」会选中「抖音1号」）。判定监听 `POST /webcast/gift/send/`（`status_code == 0`，`data.gift_struct.diamond_count` 等于页面单价）和随后的 `/webcast/wallet/info/`，扣费必须恰好等于单价，扣多了多半是进了连击。只支持 `GIFT_QTY = 1` 的付费礼物（单价从礼物块文字 `(\d+)\s*钻` 解析）。
+- **余额**：一律取直播页自己请求的 `/webcast/wallet/info/` 的 `data.diamond`（进房时一次，每次送礼回复后一次）。`open_live()` 跳转前创建 `Wallet` 一直监听，送礼前余额、送礼后余额和「结束余额」都取它最近一次的成功回复。不读余额按钮 `[data-e2e="recharge-btn"]`：余额为 0 时它显示「充值」，读不到数字。
 - **点赞**：PC 直播间没有点赞按钮，按绝对时刻每 200ms 单击直播画面容器 `[class*="LivePlayer_LivingPlayer"]` 的中心（不能用 `video`：礼物特效会临时插入隐藏的 `<video>`）。前端攒批后 `POST /webcast/room/like/?count=N`，累加 `status_code == 0` 的 `count`。连击规则使每轮 5 下只出 3 赞，`clicks_for_likes()` 据此推算点击次数，**修改 `LIKE_CLICK_INTERVAL_MS` 必须同步修改这个公式**。
   - 就绪：点赞组件 `/LiveLike.*.js` 懒加载（进房后十几秒），点击前要等它出现在 `performance` 资源列表里，所以 `open_live()` 用 `add_init_script` 把 resource timing buffer 扩大到 5000。
   - 遮挡：礼物特效 canvas 会盖住点赞层，被盖住时点击不算赞。每次单击前用 `CLICK_CLEAR_JS`（`elementFromPoint`）确认画面中心最上层元素在画面容器内，否则暂停等待（最多 15 秒），后续排程整体顺延。
@@ -76,4 +77,4 @@ python douyin_test/run_e2e.py --skip-gift
 
 - `.playwright-mcp/` 是用 Playwright MCP 探索页面时留下的控制台日志和可访问性快照，不是项目代码（已 gitignore）。
 - 源码中的中文（注释、字符串、docstring）直接写 UTF-8 字符，不要写成 `\uXXXX` 转义。
-- 在页面里执行的 JS 写在 Python 普通三引号字符串里，JS 正则的反斜杠要写两个（`\\s`、`\\d`）；`wait_balance()` 里拼的是 f-string，JS 花括号要写成 `{{ }}`。
+- 在页面里执行的 JS 写在 Python 普通三引号字符串里，JS 正则的反斜杠要写两个（`\\s`、`\\d`）；如果用 f-string 拼 JS，JS 的花括号要写成 `{{ }}`。

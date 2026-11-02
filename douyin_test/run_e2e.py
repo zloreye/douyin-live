@@ -33,9 +33,9 @@ LIKE_CLICK_INTERVAL_MS = 200
 LIKE_READY_JS = """() => performance.getEntriesByType('resource')
   .some(e => e.name.includes('/LiveLike.') && e.name.split('?')[0].endsWith('.js'))"""
 
-# 点「赠送」后页面先 POST 送礼接口（status_code=0 为成功，data.gift_struct.diamond_count 为单价），
-# 拿到回复后紧接着请求钱包接口刷新余额（data.diamond），通常 1 秒内都回来
+# 点「赠送」后页面先 POST 送礼接口（status_code=0 为成功，data.gift_struct.diamond_count 为单价）
 GIFT_SEND_API = "/webcast/gift/send/"
+# 钱包接口：进房约 18 秒时、以及每次拿到送礼回复后，页面自己会请求一次；data.diamond 是钻石余额（整数）
 WALLET_API = "/webcast/wallet/info/"
 
 # 直播页进房约 14 秒时自己会请求当前账号信息：登录时 data 里有 nickname、display_id（抖音号）；
@@ -143,25 +143,56 @@ def open_target_profile(page: Page, sec_uid: str, douyin_id: str) -> dict:
     return {**info, "web_rid": m.group(1) if m else None}
 
 
-def open_live(page: Page, web_rid: str) -> dict:
-    """进直播间并等到后面要用的元素出现；返回页面自己请求的 /webcast/user/me/ 回复，供 check_account 核对。"""
+class Wallet:
+    """一直监听页面自己请求的 /webcast/wallet/info/，余额一律以最近一次成功回复的 data.diamond 为准。
+    不读礼物栏的余额按钮：余额为 0 时它显示「充值」，读不到数字。"""
+
+    def __init__(self, page: Page) -> None:
+        self.page = page
+        self.diamond: int | None = None
+        self.seq = 0  # 成功回复的次数，用来判断某个时刻之后有没有新回复
+        self.error = ""  # 最近一次失败回复的原因
+        page.on("response", self._on_response)
+
+    def _on_response(self, resp: Response) -> None:
+        if WALLET_API not in resp.url:
+            return
+        body = _json(resp)
+        data = body.get("data") if isinstance(body.get("data"), dict) else {}
+        if body.get("status_code") == 0 and isinstance(data.get("diamond"), int):
+            self.diamond = data["diamond"]
+            self.seq += 1
+        else:
+            self.error = data.get("prompts") or f"status_code={body.get('status_code')}"
+
+    def wait_new(self, seen: int, timeout_ms: int) -> int | None:
+        """等到第 seen 次之后的成功回复，返回最新余额；超时返回 None。seen=0 即等任意一次。"""
+        deadline = time.monotonic() + timeout_ms / 1000
+        while self.seq <= seen and time.monotonic() < deadline:
+            self.page.wait_for_timeout(200)
+        return self.diamond if self.seq > seen else None
+
+
+def open_live(page: Page, web_rid: str) -> tuple[dict, Wallet]:
+    """进直播间并等到后面要用的元素出现。
+    返回页面自己请求的 /webcast/user/me/ 回复（供 check_account 核对），以及跟踪钱包接口的 Wallet。"""
     # 直播页资源有几百个，默认只记 250 条资源计时，晚加载的 LiveLike 脚本会记不进去
     page.add_init_script("performance.setResourceTimingBufferSize(5000)")
+    # 先挂上监听再跳转，账号信息和余额的请求无论早晚都不会漏
+    wallet = Wallet(page)
     ready = False
-    # 只等后面要用的元素：视频（点赞）、礼物栏（送礼）、余额按钮（读余额）。不看标题，也不固定等。
-    # 余额按钮只要求出现：余额为 0 时它显示「充值」而不是数字
+    # 只等后面要用的元素：视频（点赞）、礼物栏（送礼）。不看标题，也不固定等；余额看钱包接口，不等余额按钮
     try:
-        # 先挂上监听再跳转，账号信息请求无论早晚都不会漏
         with page.expect_response(lambda r: USER_ME_API in r.url, timeout=config.NAV_TIMEOUT_MS) as me_info:
             page.goto(config.LIVE_URL.format(web_rid=web_rid), wait_until="domcontentloaded")
-            for selector in (PLAYER_SELECTOR, '[class*="gift_item_gift_bar"]', '[data-e2e="recharge-btn"]'):
+            for selector in (PLAYER_SELECTOR, '[class*="gift_item_gift_bar"]'):
                 page.wait_for_selector(selector, timeout=config.NAV_TIMEOUT_MS)
             ready = True
     except PWTimeout:
         if not ready:
             raise
         raise RuntimeError(f"进直播间后 {config.NAV_TIMEOUT_MS // 1000} 秒内没等到当前账号信息（{USER_ME_API}）") from None
-    return _json(me_info.value)
+    return _json(me_info.value), wallet
 
 
 class LikeNotReady(Exception):
@@ -256,31 +287,6 @@ def do_like(page: Page, target: int) -> dict:
     return {"clicks": done, "accepted": accepted, "batches": batches, "paused": paused, "stopped": stopped}
 
 
-BALANCE_JS = """() => {
-    const el = document.querySelector('[data-e2e="recharge-btn"]');
-    if (!el) return null;
-    const n = parseInt((el.innerText || '').replace(/\\D/g, ''), 10);
-    return Number.isNaN(n) ? null : n;
-}"""
-
-
-def read_balance(page: Page) -> int | None:
-    return page.evaluate(BALANCE_JS)
-
-
-def wait_balance(page: Page, timeout_ms: int = 20000, below: int | None = None) -> int | None:
-    """等余额按钮里出现数字（传 below 时等它小于 below）；等不到返回当前读数。"""
-    # 包成对象返回，避免余额为 0 时被 wait_for_function 当成「条件不成立」
-    js = f"""(below) => {{
-        const n = ({BALANCE_JS})();
-        return n !== null && (below === null || n < below) ? {{ v: n }} : null;
-    }}"""
-    try:
-        return page.wait_for_function(js, arg=below, timeout=timeout_ms).json_value()["v"]
-    except PWTimeout:
-        return read_balance(page)
-
-
 def read_gift_price(tile: Locator) -> int | None:
     # 礼物块下方显示单价，如「棒棒糖 9钻」
     m = re.search(r"(\d+)\s*钻", tile.inner_text())
@@ -291,17 +297,18 @@ class InsufficientBalance(Exception):
     pass
 
 
-def prepare_gift(page: Page, name: str) -> tuple[Locator, int, int]:
-    """定位礼物并读出单价和余额，不做任何点击；余额不足时抛 InsufficientBalance。"""
+def prepare_gift(page: Page, wallet: Wallet, name: str) -> tuple[Locator, int, int]:
+    """定位礼物并读出单价，余额取钱包接口，不做任何点击；余额不足时抛 InsufficientBalance。"""
     # 名字必须完全相等：has_text 是包含匹配，「抖音」会选中 10001 钻的「抖音1号」
     tile = page.locator('[class*="gift_item_gift_bar"]').filter(has=page.get_by_text(name, exact=True)).first
     tile.wait_for(state="attached", timeout=config.ACTION_TIMEOUT_MS)
     price = read_gift_price(tile)
     if not price:
         raise RuntimeError(f"未能从礼物块读到「{name}」的价格（或为免费礼物），无法用余额校验是否送出")
-    before = wait_balance(page)
+    # 进房后 main 已经等过钱包接口，这里直接取最近一次回复
+    before = wallet.diamond
     if before is None:
-        raise RuntimeError("未能读取钻石余额，无法判定是否送出")
+        raise RuntimeError(f"没拿到钱包接口（{WALLET_API}）的余额，无法核对扣费，未点击赠送")
     if before < price:
         raise InsufficientBalance(f"余额不足：{before} 钻 < {name}单价 {price} 钻，未点击赠送")
     return tile, price, before
@@ -315,11 +322,11 @@ def _json(resp: Response) -> dict:
     return body if isinstance(body, dict) else {}
 
 
-def do_gift(page: Page, name: str, qty: int) -> tuple[int, int, int]:
+def do_gift(page: Page, wallet: Wallet, name: str, qty: int) -> tuple[int, int, int]:
     if qty != 1:
         raise ValueError("当前脚本只支持单个送礼，qty 固定为 1")
 
-    tile, price, before = prepare_gift(page, name)
+    tile, price, before = prepare_gift(page, wallet, name)
     # 礼物块收到「鼠标进入」150ms 后才显示赠送按钮；但礼物栏的「当前选中」一被页面改动（刚加载时会发生），
     # 它就取消悬停状态。鼠标不动就不会再有「鼠标进入」，所以按钮没出现时移开鼠标再悬停一次
     send = tile.locator('[data-e2e="gift-btn"]')
@@ -333,43 +340,40 @@ def do_gift(page: Page, name: str, qty: int) -> tuple[int, int, int]:
     else:
         raise RuntimeError(f"试了 5 次悬停，「{name}」的赠送按钮仍未出现，未点击")
 
-    got: dict[str, Response] = {}
+    sent: dict = {}
 
     def on_response(resp: Response) -> None:
-        if GIFT_SEND_API in resp.url and resp.request.method == "POST":
-            got.setdefault("send", resp)
-        elif WALLET_API in resp.url and "send" in got:
-            got.setdefault("wallet", resp)
+        # 记下送礼回复到达时钱包接口已有几次成功回复：在它之后的那次才是送礼后的余额
+        if GIFT_SEND_API in resp.url and resp.request.method == "POST" and "resp" not in sent:
+            sent.update(resp=resp, seq=wallet.seq)
 
     page.on("response", on_response)
     try:
         send.click()
         deadline = time.monotonic() + 15
-        while time.monotonic() < deadline and "wallet" not in got:
+        while time.monotonic() < deadline and "resp" not in sent:
             page.wait_for_timeout(200)
     finally:
         page.remove_listener("response", on_response)
         # 送完礼礼物块会进入连击状态（「连击 空格」按钮和数量框），把鼠标移开，避免后续误触
         page.mouse.move(5, 5)
 
-    if "send" not in got:
+    if "resp" not in sent:
         raise RuntimeError("点击赠送后 15 秒内没有收到送礼接口的回复，无法确认是否送出")
-    body = _json(got["send"])
+    body = _json(sent["resp"])
     data = body.get("data") if isinstance(body.get("data"), dict) else {}
     if body.get("status_code") != 0:
-        reason = data.get("prompts") or ("触发风控验证码" if got["send"].headers.get("bdturing-verify") else "")
+        reason = data.get("prompts") or ("触发风控验证码" if sent["resp"].headers.get("bdturing-verify") else "")
         raise RuntimeError(f"送礼被服务器拒绝：{reason or 'status_code=' + str(body.get('status_code'))}")
     unit = (data.get("gift_struct") or {}).get("diamond_count")
     if unit is not None and unit != price:
         raise RuntimeError(f"服务器记录的礼物单价是 {unit} 钻，不是页面上的 {price} 钻，可能送错了礼物")
 
-    wallet = _json(got["wallet"]) if "wallet" in got else {}
-    after = (wallet.get("data") or {}).get("diamond") if wallet.get("status_code") == 0 else None
+    # 页面拿到送礼回复后会请求钱包接口刷新余额，通常 1 秒内回来
+    after = wallet.wait_new(sent["seq"], timeout_ms=10000)
     if after is None:
-        # 没等到钱包接口时，退回等页面上的余额变小
-        after = wait_balance(page, timeout_ms=10000, below=before)
-    if after is None:
-        raise RuntimeError("服务器已确认送出，但读不到送礼后的余额，无法核对扣费")
+        why = f"（最近一次失败：{wallet.error}）" if wallet.error else ""
+        raise RuntimeError(f"服务器已确认送出，但 10 秒内没等到钱包接口刷新余额{why}，无法核对扣费")
 
     delta = before - after
     if delta != price:
@@ -430,7 +434,7 @@ def main() -> int:
 
             steps.add("直播状态", "PASS", f"直播间号 {target['web_rid']}")
 
-            me = open_live(page, target["web_rid"])
+            me, wallet = open_live(page, target["web_rid"])
             steps.add("进入直播间", "PASS", page.title())
             shot(page, "03_live")
 
@@ -438,16 +442,18 @@ def main() -> int:
             nickname, my_id = check_account(me, config.MY_DOUYIN_ID)
             steps.add("确认登录账号", "PASS", f"{nickname} / {my_id}（与配置一致）")
 
-            balance = wait_balance(page)
-            steps.add(
-                "账户钻石余额",
-                "PASS" if balance is not None else "WARN",
-                f"当前 {balance} 钻" if balance is not None else "未读取到余额",
-            )
+            # 钱包接口通常在礼物栏出现前就回来了，这里一般不用等
+            balance = wallet.wait_new(0, config.ACTION_TIMEOUT_MS)
+            if balance is not None:
+                steps.add("账户钻石余额", "PASS", f"当前 {balance} 钻")
+            else:
+                why = f"：{wallet.error}" if wallet.error else ""
+                wait_s = config.ACTION_TIMEOUT_MS // 1000
+                steps.add("账户钻石余额", "WARN", f"{wait_s} 秒内没等到钱包接口（{WALLET_API}）的余额{why}")
 
             if not args.skip_gift:
                 try:
-                    delta, before, after = do_gift(page, args.gift, config.GIFT_QTY)
+                    delta, before, after = do_gift(page, wallet, args.gift, config.GIFT_QTY)
                 except InsufficientBalance as exc:
                     steps.add("赠送礼物", "WARN", str(exc))
                 else:
@@ -482,9 +488,9 @@ def main() -> int:
             else:
                 steps.add("点赞", "SKIP", "按参数跳过")
 
-            final_balance = read_balance(page)
-            if final_balance is not None:
-                steps.add("结束余额", "PASS", f"{final_balance} 钻")
+            # 最近一次钱包接口回复：送了礼就是送礼后的余额，否则是进房时的
+            if wallet.diamond is not None:
+                steps.add("结束余额", "PASS", f"{wallet.diamond} 钻")
 
         except SystemExit:
             raise
